@@ -1,17 +1,7 @@
 bin:bin/heif-convert
-bin:bin/scheduler.py
-bin:bin/sync_runner.py
-bin:bin/move_runner.py
-lib:lib/libheif.so.1
-lib:lib/libde265.so.0
-lib:lib/libjpeg.so.62
-lib:lib/libtiff.so.6
-lib:lib/libzstd.so.1
-lib:lib/liblzma.so.5
-lib:lib/libdeflate.so.0
-lib:lib/libLerc.so.4
-lib:lib/libjbig.so.0
-rsc:lib/libheif/plugins
+rsc:bin/scheduler.py
+rsc:bin/sync_runner.py
+rsc:bin/move_runner.py
 rsc:lib/config_manager.py
 rsc:lib/sync_engine.py
 rsc:lib/icloud_client.py
@@ -29,4 +19,3 @@ rsc:app/images
 rsc:app/texts
 rsc:conf/privilege
 rsc:conf/resource
-rsc:share/wheelhouse

@@ -819,16 +819,19 @@ def _run_sync_locked(account_id):
 
         progress.save()
 
+        heic_convert_failures = []
         for album_name, folder_key, subfolder, _count, _latest in plan:
             if should_stop(account_id):
                 break
-            _sync_album(
+            failures = _sync_album(
                 account_id, photos_svc, album_name,
                 target_dir, sync_config, progress,
                 folder_key=folder_key,
                 subfolder=subfolder,
                 client=client
             )
+            if failures:
+                heic_convert_failures.extend(failures)
 
         if should_stop(account_id):
             progress.status = "stopped"
@@ -860,6 +863,7 @@ def _run_sync_locked(account_id):
 
 def _sync_album(account_id, photos_svc, album_name, target_dir, sync_config, progress, folder_key, subfolder, client=None):
     """Sync a single album."""
+    heic_convert_failures = []
     progress.current_album = album_name
     progress.save()
 
@@ -871,7 +875,7 @@ def _sync_album(account_id, photos_svc, album_name, target_dir, sync_config, pro
         album = photos_svc.albums.get(album_name)
     if not album:
         LOGGER.warning("Album not found: %s", album_name)
-        return
+        return heic_convert_failures
 
     # Get folder structure config for this type
     folder_config = sync_config.get(folder_key, {})
@@ -1057,8 +1061,6 @@ def _sync_album(account_id, photos_svc, album_name, target_dir, sync_config, pro
                 "SynoCommunity imagemagick package or reinstall this app with "
                 "bundled binaries included.", formats,
             )
-
-        heic_convert_failures = []
 
         def _process(task):
             """Returns (photo, fname, fpath, ok, is_conn_error, is_url_expired)."""
@@ -1334,3 +1336,5 @@ def _sync_album(account_id, photos_svc, album_name, target_dir, sync_config, pro
         album_name, perf["batches"], perf["pairs"],
         perf["fetch_wait"], perf["local"], perf["exists_calls"], perf["exists_time"]
     )
+
+    return heic_convert_failures

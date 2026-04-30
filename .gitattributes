@@ -1,0 +1,7 @@
+*.sh      text eol=lf
+*.cgi     text eol=lf
+*.py      text eol=lf
+Makefile  text eol=lf
+PLIST     text eol=lf
+privilege text eol=lf
+resource  text eol=lf
