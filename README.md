@@ -7,7 +7,7 @@ Built with the [SynoCommunity/spksrc](https://github.com/SynoCommunity/spksrc) c
 
 ## Features
 
-- **iCloud Photostream, Albums & Shared Albums** — incremental sync with deduplication via hardlinks
+- **iCloud Photostream, Albums & Shared Libraries** — incremental sync with deduplication via hardlinks
 - **Multi-account** — several Apple IDs side by side, each with its own settings
 - **Parallel downloads** — 1/2/4/8 configurable per account
 - **Folder structure** — year / year-month / year-month-day / flat
@@ -104,6 +104,10 @@ If you have ADP enabled, this app cannot access your iCloud Photos. ADP encrypts
 **Workarounds:**
 1. Disable ADP: *Settings -> Apple ID -> iCloud -> Advanced Data Protection -> Turn Off*
 2. Enable temporary web access at [icloud.com](https://icloud.com) (grants ~1 hour API access)
+
+### Shared Albums (legacy)
+
+Sadly had to remove the Shared Albums feature from Settings, Albums tab, and sync engine. Legacy Shared Albums use a separate Apple API (sharedstreams.icloud.com) that is not accessible via CloudKit. Use the iCloud Shared Library (iOS 16+) feature instead.
 
 ## Privacy & security
 
