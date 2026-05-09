@@ -272,6 +272,178 @@ def _log_sanitizer():
     return sanitize
 
 
+def _build_diagnostics(sanitize):
+    """Build a diagnostics report with per-account state for support.
+
+    Includes sync_progress.json, manifest DB stats, sync config excerpt,
+    and file timestamps — enough to debug issues even when logs are empty.
+    """
+    import time as _time
+    import config_manager
+
+    lines = []
+    lines.append("=== iCloud Photo Sync Diagnostics ===")
+    lines.append("Generated: %s" % _time.strftime("%Y-%m-%d %H:%M:%S"))
+    lines.append("")
+
+    # Global config excerpt (non-sensitive)
+    try:
+        cfg = config_manager.load_config() or {}
+        lines.append("--- Global config ---")
+        lines.append("log_level: %s" % cfg.get("log_level", "INFO"))
+        lines.append("log_retention_days: %s" % cfg.get("log_retention_days", 7))
+        lines.append("accounts: %d" % len(cfg.get("accounts") or []))
+        lines.append("")
+    except Exception as e:
+        lines.append("Global config error: %s" % e)
+        lines.append("")
+
+    # Per-account diagnostics
+    accounts = config_manager.get_accounts()
+    for i, acc in enumerate(accounts, 1):
+        acc_id = acc.get("id", "")
+        lines.append("=" * 50)
+        lines.append("Account %d: %s" % (i, sanitize(acc.get("apple_id", "?"))))
+        lines.append("Status: %s" % acc.get("status", "?"))
+        acc_dir = config_manager.get_account_dir(acc_id)
+        lines.append("Account dir exists: %s" % os.path.isdir(acc_dir))
+        lines.append("")
+
+        # sync_progress.json
+        prog_path = os.path.join(acc_dir, "sync_progress.json")
+        lines.append("  --- sync_progress.json ---")
+        try:
+            stat = os.stat(prog_path)
+            lines.append("  mtime: %s" % _time.strftime(
+                "%Y-%m-%d %H:%M:%S", _time.localtime(stat.st_mtime)))
+            lines.append("  size: %d bytes" % stat.st_size)
+            import json as _json
+            with open(prog_path, "r") as f:
+                prog = _json.load(f)
+            for k in ("status", "started_at", "finished_at", "total_photos",
+                       "synced_photos", "skipped_photos", "failed_photos",
+                       "current_album", "error"):
+                v = prog.get(k, "")
+                if k in ("started_at", "finished_at") and v:
+                    v = "%s (%s)" % (v, _time.strftime(
+                        "%Y-%m-%d %H:%M:%S", _time.localtime(v)))
+                lines.append("  %s: %s" % (k, v))
+            if prog.get("warnings"):
+                lines.append("  warnings: %s" % sanitize(
+                    str(prog["warnings"][:5])))
+        except FileNotFoundError:
+            lines.append("  (file not found)")
+        except Exception as e:
+            lines.append("  error reading: %s" % e)
+        lines.append("")
+
+        # Manifest DB stats
+        lines.append("  --- Manifest DB ---")
+        db_path = os.path.join(acc_dir, "sync_manifest.db")
+        try:
+            stat = os.stat(db_path)
+            lines.append("  mtime: %s" % _time.strftime(
+                "%Y-%m-%d %H:%M:%S", _time.localtime(stat.st_mtime)))
+            lines.append("  size: %d bytes" % stat.st_size)
+            import sync_manifest
+            stats = sync_manifest.get_stats(acc_id)
+            for k, v in stats.items():
+                if k == "last_sync" and v:
+                    v = "%s (%s)" % (v, _time.strftime(
+                        "%Y-%m-%d %H:%M:%S", _time.localtime(v)))
+                lines.append("  %s: %s" % (k, v))
+        except FileNotFoundError:
+            lines.append("  (file not found)")
+        except Exception as e:
+            lines.append("  error reading: %s" % e)
+        lines.append("")
+
+        # Sync config excerpt (non-sensitive fields only)
+        lines.append("  --- Sync config ---")
+        try:
+            sc = config_manager.get_sync_config(acc_id)
+            lines.append("  target_dir: %s" % sanitize(
+                sc.get("target_dir", "")))
+            lines.append("  sync_interval: %s" % sc.get("sync_interval", ""))
+            ps = sc.get("photostream", {})
+            lines.append("  photostream.enabled: %s" % ps.get("enabled", ""))
+            lines.append("  photostream.folder_structure: %s" % ps.get(
+                "folder_structure", ""))
+            ab = sc.get("albums", {})
+            lines.append("  albums.enabled: %s" % ab.get("enabled", ""))
+            selected = ab.get("selected", {})
+            lines.append("  albums.selected: %d album(s)" % len(
+                [v for v in selected.values() if v]))
+            sl = sc.get("shared_library", {})
+            if sl:
+                lines.append("  shared_library.enabled: %s" % sl.get(
+                    "enabled", ""))
+            lines.append("  parallel_downloads: %s" % sc.get(
+                "parallel_downloads", ""))
+            lines.append("  file_format: %s" % sc.get("file_format", ""))
+            lines.append("  filename_format: %s" % sc.get(
+                "filename_format", ""))
+            lines.append("  conflict_resolution: %s" % sc.get(
+                "conflict_resolution", ""))
+        except Exception as e:
+            lines.append("  error reading: %s" % e)
+        lines.append("")
+
+        # Album cache
+        lines.append("  --- Album cache ---")
+        cache_path = os.path.join(acc_dir, "album_cache.json")
+        try:
+            stat = os.stat(cache_path)
+            lines.append("  mtime: %s" % _time.strftime(
+                "%Y-%m-%d %H:%M:%S", _time.localtime(stat.st_mtime)))
+            import json as _json
+            with open(cache_path, "r") as f:
+                cache = _json.load(f)
+            lines.append("  albums cached: %d" % len(
+                cache.get("counts", {})))
+            lines.append("  has_shared_library: %s" % cache.get(
+                "has_shared_library", False))
+            lines.append("  updated: %s" % (
+                _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(
+                    cache["updated"])) if cache.get("updated") else "never"))
+        except FileNotFoundError:
+            lines.append("  (file not found)")
+        except Exception as e:
+            lines.append("  error reading: %s" % e)
+        lines.append("")
+
+        # Scheduler marker
+        lines.append("  --- Scheduler ---")
+        marker = os.path.join(acc_dir, "last_sync_run")
+        try:
+            stat = os.stat(marker)
+            lines.append("  last_sync_run mtime: %s" % _time.strftime(
+                "%Y-%m-%d %H:%M:%S", _time.localtime(stat.st_mtime)))
+        except FileNotFoundError:
+            lines.append("  last_sync_run: (not found)")
+        except Exception as e:
+            lines.append("  error: %s" % e)
+        lines.append("")
+
+    # Log file sizes and mtimes
+    lines.append("=" * 50)
+    lines.append("--- Log files ---")
+    log_dir = os.path.join(config_manager.PKG_VAR, "logs")
+    try:
+        for name in sorted(os.listdir(log_dir)):
+            path = os.path.join(log_dir, name)
+            if os.path.isfile(path):
+                stat = os.stat(path)
+                lines.append("  %s: %d bytes, mtime %s" % (
+                    name, stat.st_size,
+                    _time.strftime("%Y-%m-%d %H:%M:%S",
+                                   _time.localtime(stat.st_mtime))))
+    except Exception as e:
+        lines.append("  error: %s" % e)
+
+    return "\n".join(lines) + "\n"
+
+
 def export_logs_zip():
     """Stream all package logs + INFO + version as a ZIP for support reports.
 
@@ -359,6 +531,15 @@ def export_logs_zip():
             except OSError:
                 pass
             zf.writestr("environment.txt", "\n".join(lines))
+        except Exception:
+            pass
+
+        # Per-account diagnostics: sync_progress, manifest stats, config
+        # excerpt, and file timestamps — enough to debug issues even when
+        # the logs are empty (e.g. after log rotation).
+        try:
+            diag = _build_diagnostics(sanitize)
+            zf.writestr("diagnostics.txt", diag)
         except Exception:
             pass
 

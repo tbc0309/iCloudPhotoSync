@@ -40,6 +40,10 @@ def handle(params):
         return _set_album(params)
     if action == "validate_path":
         return _validate_path(params)
+    if action == "reset_defaults":
+        return _reset_defaults(params)
+    if action == "reset_database":
+        return _reset_database(params)
 
     return {"success": False, "error": {"code": 101, "message": "Unknown action"}}
 
@@ -327,6 +331,41 @@ def _set_album(params):
 
     enabled = params.getvalue("enabled", "true").strip().lower() in ("true", "1", "yes")
     album_type = params.getvalue("album_type", "user").strip()
+    library = params.getvalue("library", "").strip() or None
 
-    config = config_manager.set_album_sync(account_id, album_name, enabled)
+    config = config_manager.set_album_sync(account_id, album_name, enabled, library=library)
     return {"success": True, "data": {"album": album_name, "enabled": enabled}}
+
+
+def _reset_defaults(params):
+    account_id = params.getvalue("account_id", "").strip()
+    if not account_id:
+        return {"success": False, "error": {"code": 301, "message": "account_id required"}}
+
+    if _sync_running(account_id):
+        return {"success": False, "error": {"code": 305,
+            "message": "Cannot reset while a sync is running."}}
+
+    current = config_manager.get_sync_config(account_id)
+    defaults = config_manager.get_sync_config("__nonexistent__")
+    defaults["target_dir"] = current.get("target_dir", defaults["target_dir"])
+    defaults["albums"]["selected"] = current.get("albums", {}).get("selected", {})
+    sl_selected = current.get("shared_library", {}).get("selected")
+    if sl_selected:
+        defaults.setdefault("shared_library", {})["selected"] = sl_selected
+    config_manager.save_sync_config(account_id, defaults)
+    return {"success": True, "data": defaults}
+
+
+def _reset_database(params):
+    account_id = params.getvalue("account_id", "").strip()
+    if not account_id:
+        return {"success": False, "error": {"code": 301, "message": "account_id required"}}
+
+    if _sync_running(account_id):
+        return {"success": False, "error": {"code": 305,
+            "message": "Cannot reset while a sync is running."}}
+
+    import sync_manifest
+    sync_manifest.clear_all(account_id)
+    return {"success": True}

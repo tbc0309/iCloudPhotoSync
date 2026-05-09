@@ -109,16 +109,18 @@ def _sync_status(params):
             hours = int(hours)
         except (TypeError, ValueError):
             hours = 6
-        if hours < 1:
-            hours = 1
-        marker = os.path.join(config_manager.get_account_dir(account_id), ".last_scheduled_run")
-        last_mtime = 0
-        try:
-            last_mtime = int(os.path.getmtime(marker))
-        except OSError:
-            pass
-        next_run = last_mtime + hours * 3600 if last_mtime else int(_time.time())
-        _next_scheduled_run = next_run
+        if hours < 0:
+            hours = 0
+        if hours == 0:
+            _next_scheduled_run = 0
+        else:
+            marker = os.path.join(config_manager.get_account_dir(account_id), ".last_scheduled_run")
+            last_mtime = 0
+            try:
+                last_mtime = int(os.path.getmtime(marker))
+            except OSError:
+                pass
+            _next_scheduled_run = last_mtime + hours * 3600 if last_mtime else int(_time.time())
         _sync_interval_hours = hours
     except Exception:
         _next_scheduled_run = 0

@@ -353,11 +353,14 @@ def save_sync_config(account_id, config):
     atomic_write_json(path, config, indent=2)
 
 
-def set_album_sync(account_id, album_name, enabled):
+def set_album_sync(account_id, album_name, enabled, library=None):
     """Toggle sync for a specific album."""
     with _locked(_sync_config_path(account_id) + ".lock"):
         config = get_sync_config(account_id)
-        config["albums"]["selected"][album_name] = enabled
+        if library == "shared":
+            config.setdefault("shared_library", {}).setdefault("selected", {})[album_name] = enabled
+        else:
+            config["albums"]["selected"][album_name] = enabled
         save_sync_config(account_id, config)
     return config
 

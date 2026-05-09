@@ -45,99 +45,59 @@ def _remove_album_from_cache(account_id, album_name):
         pass
 
 
-LIBRARY_DIR_PERSONAL = "Meine Mediathek"
-LIBRARY_DIR_SHARED = "Geteilte Mediathek"
+SHARED_DIR = "Shared"
 
-# Old top-level folder names (pre-migration structure)
-_OLD_TOPLEVEL_DIRS = ("Photostream", "Albums", "Shared Library")
+_OLD_DIR_NAMES = {
+    "Meine Mediathek": "",
+    "Geteilte Mediathek": SHARED_DIR,
+    "Personal Library": "",
+    "Shared Library": SHARED_DIR,
+}
 
 
-def _migrate_to_library_structure(target_dir, account_id):
-    """Migrate old flat structure to library-based subfolder structure.
-
-    Old:  target_dir/Photostream/..., target_dir/Albums/...
-    New:  target_dir/Meine Mediathek/Photostream/..., target_dir/Meine Mediathek/Albums/...
-    """
-    marker_file = os.path.join(target_dir, ".library_migrated")
-    if os.path.exists(marker_file):
+def _migrate_manifest_paths(account_id, target_dir):
+    """One-time migration: rewrite old library-subfolder paths to flat layout."""
+    marker = os.path.join(config_manager.get_account_dir(account_id), ".paths_migrated")
+    if os.path.exists(marker):
         return
-
-    personal_dir = os.path.join(target_dir, LIBRARY_DIR_PERSONAL)
-    moved_something = False
-
-    for old_name in ("Photostream", "Albums"):
-        old_path = os.path.join(target_dir, old_name)
-        if os.path.isdir(old_path):
-            _makedirs_safe(personal_dir)
-            new_path = os.path.join(personal_dir, old_name)
-            if not os.path.exists(new_path):
-                LOGGER.info("Migration: moving %s -> %s", old_path, new_path)
-                os.rename(old_path, new_path)
-                moved_something = True
-
-    # Move "Shared Library" -> "Geteilte Mediathek/Photostream"
-    old_sl = os.path.join(target_dir, "Shared Library")
-    if os.path.isdir(old_sl):
-        shared_dir = os.path.join(target_dir, LIBRARY_DIR_SHARED)
-        new_sl = os.path.join(shared_dir, "Photostream")
-        if not os.path.exists(new_sl):
-            _makedirs_safe(shared_dir)
-            LOGGER.info("Migration: moving %s -> %s", old_sl, new_sl)
-            os.rename(old_sl, new_sl)
-            moved_something = True
-
-    if moved_something:
-        # Update all manifest paths with new prefix
+    try:
+        conn = sync_manifest._connect(account_id)
         try:
-            conn = sync_manifest._connect(account_id)
-            try:
-                rows = conn.execute(
-                    "SELECT rowid, local_path FROM synced_photos"
-                ).fetchall()
-                updates = []
-                for row in rows:
-                    path = row["local_path"]
-                    new_path = _migrate_path(path, target_dir)
+            rows = conn.execute(
+                "SELECT rowid, local_path FROM synced_photos"
+            ).fetchall()
+            updates = []
+            for row in rows:
+                path = row["local_path"]
+                if not path.startswith(target_dir):
+                    continue
+                rel = path[len(target_dir):].lstrip(os.sep)
+                parts = rel.split(os.sep)
+                if len(parts) >= 2 and parts[0] in _OLD_DIR_NAMES:
+                    replacement = _OLD_DIR_NAMES[parts[0]]
+                    if replacement:
+                        new_rel = os.path.join(replacement, *parts[1:])
+                    else:
+                        new_rel = os.path.join(*parts[1:])
+                    new_path = os.path.join(target_dir, new_rel)
                     if new_path != path:
                         updates.append((new_path, row["rowid"]))
-                if updates:
-                    conn.executemany(
-                        "UPDATE synced_photos SET local_path=? WHERE rowid=?",
-                        updates
-                    )
-                    conn.commit()
-                    LOGGER.info("Migration: updated %d manifest paths", len(updates))
-            finally:
-                conn.close()
-        except Exception:
-            LOGGER.exception("Migration: failed to update manifest paths")
-
-    # Write marker so we don't run again
+            if updates:
+                conn.executemany(
+                    "UPDATE synced_photos SET local_path=? WHERE rowid=?",
+                    updates
+                )
+                conn.commit()
+                LOGGER.info("Manifest migration: updated %d paths", len(updates))
+        finally:
+            conn.close()
+    except Exception:
+        LOGGER.exception("Manifest migration failed")
     try:
-        with open(marker_file, "w") as f:
-            f.write("migrated at %s\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+        with open(marker, "w") as f:
+            f.write("migrated\n")
     except Exception:
         pass
-
-
-def _migrate_path(path, target_dir):
-    """Rewrite a single manifest path from old to new structure."""
-    if not path.startswith(target_dir):
-        return path
-    rel = path[len(target_dir):].lstrip(os.sep)
-    parts = rel.split(os.sep)
-    if not parts:
-        return path
-    first = parts[0]
-    if first in ("Photostream", "Albums"):
-        return os.path.join(target_dir, LIBRARY_DIR_PERSONAL, rel)
-    if first == "Shared Library":
-        new_rel = os.path.join(LIBRARY_DIR_SHARED, "Photostream", *parts[1:])
-        return os.path.join(target_dir, new_rel)
-    if first == "Shared":
-        # Shared albums stay as-is (already in their own folder)
-        return path
-    return path
 
 
 def _sanitize_path_component(name):
@@ -249,6 +209,14 @@ def _is_disk_full_error(exc):
     """Return True if the exception indicates disk/quota exhaustion."""
     if isinstance(exc, OSError) and getattr(exc, "errno", None) in _DISK_FULL_ERRNOS:
         return True
+    return False
+
+
+def _is_permanent_api_error(exc):
+    """Return True if the exception is a permanent API error (don't retry)."""
+    from pyicloud_ipd.exceptions import PyiCloudAPIResponseException
+    if isinstance(exc, PyiCloudAPIResponseException):
+        return getattr(exc, "code", "") in ("BAD_REQUEST",)
     return False
 
 
@@ -869,8 +837,8 @@ def _run_sync_locked(account_id):
         progress.save()
         return progress
 
-    # Migrate old flat structure to library-based structure
-    _migrate_to_library_structure(target_dir, account_id)
+    # One-time migration: rewrite old German folder names in manifest
+    _migrate_manifest_paths(account_id, target_dir)
 
     # Authenticate
     client = icloud_client.get_client(account_id, account["apple_id"])
@@ -953,8 +921,10 @@ def _run_sync_locked(account_id):
                         LOGGER.warning(
                             "Album %r not found in iCloud — it may have been "
                             "renamed, deleted, or contains special characters "
-                            "that changed during encoding. Skipping.", name)
+                            "that changed during encoding. "
+                            "Auto-removing from sync list.", name)
                         _remove_album_from_cache(account_id, name)
+                        config_manager.set_album_sync(account_id, name, False)
                         return (0, 0)
                     if alb.album_type == "folder":
                         return (0, 0)
@@ -963,8 +933,11 @@ def _run_sync_locked(account_id):
                     first = alb.photos(limit=2, offset=0, direction="DESCENDING")
                     latest = first[0].created if first else 0
                     return (alb.photo_count or 0, latest)
-                except Exception:
-                    LOGGER.exception("Failed to get meta for album %s", name)
+                except Exception as e:
+                    if _is_permanent_api_error(e):
+                        LOGGER.warning("Album %s: %s (skipping)", name, e)
+                    else:
+                        LOGGER.exception("Failed to get meta for album %s", name)
                     return (0, 0)
 
             album_metas = [(name,) + _album_meta(name) for name in enabled_albums]
@@ -972,7 +945,9 @@ def _run_sync_locked(account_id):
             for name, count, latest in album_metas:
                 alb = photos_svc.albums.get(name)
                 if alb and alb.parent_folder:
-                    sub = os.path.join(_sanitize_path_component(alb.parent_folder), _sanitize_path_component(name))
+                    parts = [_sanitize_path_component(p) for p in alb.parent_folder.split("/")]
+                    parts.append(_sanitize_path_component(name))
+                    sub = os.path.join(*parts)
                 else:
                     sub = _sanitize_path_component(name)
                 plan.append((name, "albums", sub, count, latest))
@@ -1000,7 +975,9 @@ def _run_sync_locked(account_id):
                             except Exception:
                                 count = 0
                             if alb.parent_folder:
-                                sub = os.path.join(_sanitize_path_component(alb.parent_folder), _sanitize_path_component(name))
+                                parts = [_sanitize_path_component(p) for p in alb.parent_folder.split("/")]
+                                parts.append(_sanitize_path_component(name))
+                                sub = os.path.join(*parts)
                             else:
                                 sub = _sanitize_path_component(name)
                             plan.append((name, "shared_library_albums", sub, count, 0))
@@ -1172,13 +1149,11 @@ def _sync_album(account_id, photos_svc, album_name, target_dir, sync_config, pro
                 filename = _build_filename(photo, sync_config)
 
                 if folder_key == "shared_library":
-                    dest_dir = os.path.join(target_dir, LIBRARY_DIR_SHARED, "Photostream", date_subfolder)
-                elif folder_key == "shared_library_albums":
-                    dest_dir = os.path.join(target_dir, LIBRARY_DIR_SHARED, "Albums", subfolder, date_subfolder)
+                    dest_dir = os.path.join(target_dir, SHARED_DIR, date_subfolder)
                 elif subfolder:
-                    dest_dir = os.path.join(target_dir, LIBRARY_DIR_PERSONAL, "Albums", subfolder, date_subfolder)
+                    dest_dir = os.path.join(target_dir, "Albums", subfolder, date_subfolder)
                 else:
-                    dest_dir = os.path.join(target_dir, LIBRARY_DIR_PERSONAL, "Photostream", date_subfolder)
+                    dest_dir = os.path.join(target_dir, "Photostream", date_subfolder)
 
                 if sync_config.get("format_folders"):
                     ext = os.path.splitext(filename)[1].upper().lstrip(".")
@@ -1338,20 +1313,33 @@ def _sync_album(account_id, photos_svc, album_name, target_dir, sync_config, pro
                     LOGGER.exception("Proactive refresh failed after re-auth")
 
             refreshed = 0
-            for photo, _old_url, fpath, fname in expiring_tasks:
+            kept_old = 0
+            already_expired = 0
+            now_check = int(time.time())
+            for photo, old_url, fpath, fname in expiring_tasks:
                 new_url = fresh_urls.get(photo.id)
                 if new_url:
                     valid_tasks.append((photo, new_url, fpath, fname))
                     refreshed += 1
                 else:
-                    progress.failed_photos += 1
+                    expiry = _url_expiry_time(old_url)
+                    if expiry and expiry < now_check:
+                        already_expired += 1
+                        with progress_lock:
+                            progress.failed_photos += 1
+                    else:
+                        valid_tasks.append((photo, old_url, fpath, fname))
+                        kept_old += 1
             if refreshed:
                 LOGGER.info("Proactively refreshed %d/%d expired URLs",
                             refreshed, len(expiring_tasks))
-            elif expiring_tasks:
-                LOGGER.warning("Proactive refresh returned 0 fresh URLs for %d photos",
-                               len(expiring_tasks))
-            progress.save()
+            if kept_old:
+                LOGGER.warning("Proactive refresh: %d photos kept old URL "
+                               "(will retry on 410 during download)", kept_old)
+            if already_expired:
+                LOGGER.warning("Proactive refresh: %d photos with already-expired "
+                               "URLs counted as failed (refresh returned no new URL)",
+                               already_expired)
 
         pending_tasks = list(valid_tasks)
         net_retries_used = 0
@@ -1523,6 +1511,9 @@ def _sync_album(account_id, photos_svc, album_name, target_dir, sync_config, pro
                             photos = album.photos(limit=limit, offset=off, direction="DESCENDING")
                             break
                         except Exception as e:
+                            if _is_permanent_api_error(e):
+                                LOGGER.warning("Producer fetch failed at offset=%d: %s (permanent, not retrying)", off, e)
+                                break
                             LOGGER.exception("Producer fetch failed at offset=%d (attempt %d)", off, _retry + 1)
                             if _is_connection_error(e):
                                 if not _wait_for_connectivity(account_id, max_cycles=3):
@@ -1574,6 +1565,9 @@ def _sync_album(account_id, photos_svc, album_name, target_dir, sync_config, pro
                 try:
                     return album.photos(limit=lim, offset=off, direction=dirn)
                 except Exception as e:
+                    if _is_permanent_api_error(e):
+                        LOGGER.warning("Fetch failed at offset=%d: %s (permanent, not retrying)", off, e)
+                        return None
                     LOGGER.exception("Fetch failed at offset=%d (attempt %d)", off, _retry + 1)
                     if _is_connection_error(e):
                         if not _wait_for_connectivity(account_id, max_cycles=3):

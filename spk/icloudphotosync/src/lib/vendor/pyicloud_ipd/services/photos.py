@@ -17,9 +17,8 @@ SMART_FOLDERS = {
     "Screenshots": ("SCREENSHOT", "Screenshot"),
     "Live": ("LIVE", "Live"),
     "Panoramas": ("PANORAMA", "Panorama"),
-    "Time-lapse": ("TIME-LAPSE", "Time-lapse"),
-    "Slo-mo": ("SLO-MO", "Slo-mo"),
-    "Bursts": ("BURST", "Burst"),
+    "Time-lapse": ("TIMELAPSE", "Time-lapse"),
+    "Slo-mo": ("SLOMO", "Slo-mo"),
 }
 
 
@@ -58,6 +57,9 @@ class PhotoAlbum:
         elif album_type == "smart":
             self.list_type = "CPLAssetAndMasterInSmartAlbumByAssetDate"
             self.obj_type = "CPLAssetInSmartAlbumByAssetDate:%s" % (smart_count_key or smart_filter)
+        elif album_type == "burst":
+            self.list_type = "CPLBurstStackAssetAndMasterByAssetDate"
+            self.obj_type = "CPLAssetBurstStackAssetByAssetDate"
         elif album_type == "user":
             self.list_type = "CPLContainerRelationLiveByAssetDate"
             self.obj_type = "CPLContainerRelationNotDeletedByAssetDate:%s" % record_name
@@ -226,12 +228,12 @@ class PhotosService:
     def _lookup_records(self, record_names, zone_id=None):
         """Fetch records by recordName via CloudKit records/lookup."""
         url = "%s/records/lookup" % self._service_endpoint
-        zid = zone_id or self.ZONE_ID
+        zid = dict(zone_id or self.ZONE_ID)
+        if "ownerRecordName" not in zid:
+            zid["ownerRecordName"] = "_defaultOwner"
         payload = {
-            "records": [
-                {"recordName": rn, "zoneID": zid}
-                for rn in record_names
-            ],
+            "records": [{"recordName": rn} for rn in record_names],
+            "zoneID": zid,
         }
         # Don't send getCurrentSyncToken for lookups — Apple rejects it
         # with "syncToken operations supported only in SyncZone" when the
@@ -285,33 +287,73 @@ class PhotosService:
                      photo.id, 3)
         return None
 
-    _LOOKUP_CHUNK_SIZE = 200
+    _LOOKUP_CHUNK_SIZE = 50
+    _LOOKUP_CHUNK_DELAY = 2
 
     def batch_refresh_photo_urls(self, photos, zone_id=None):
         """Re-fetch master records for multiple photos to get fresh URLs.
 
         Returns dict of photo.id -> fresh_url for successfully refreshed
         photos. Raises on session/auth errors so the caller can re-auth.
-        Splits into chunks to avoid Apple's records array size limit.
+        Splits into small chunks with delays to avoid Apple rate-limiting.
         """
         if not photos:
             return {}
         photo_map = {p.id: p for p in photos}
         result = {}
+        total_records = 0
+        total_server_errors = 0
+        total_deleted = 0
+        total_no_url = 0
+        lookup_broken = False
         for i in range(0, len(photos), self._LOOKUP_CHUNK_SIZE):
             chunk = photos[i:i + self._LOOKUP_CHUNK_SIZE]
             record_names = [p.id for p in chunk]
             data = self._lookup_records(record_names, zone_id=zone_id)
-            for record in data.get("records", []):
+            records = data.get("records", [])
+            total_records += len(records)
+            chunk_errors = 0
+            for record in records:
                 rn = record.get("recordName", "")
-                if rn not in photo_map or record.get("serverErrorCode"):
+                if rn not in photo_map:
                     continue
-                orig = record.get("fields", {}).get(
+                err = record.get("serverErrorCode")
+                if err:
+                    total_server_errors += 1
+                    chunk_errors += 1
+                    if total_server_errors <= 3:
+                        LOGGER.warning(
+                            "Refresh: serverErrorCode=%s reason=%s for %s",
+                            err, record.get("reason", ""), rn)
+                    continue
+                fields = record.get("fields", {})
+                if fields.get("isDeleted", {}).get("value"):
+                    total_deleted += 1
+                    continue
+                orig = fields.get(
                     "resOriginalRes", {}).get("value", {})
                 url = orig.get("downloadURL")
                 if url:
                     photo_map[rn]._master = record
                     result[rn] = PhotoAsset._fix_url(url)
+                else:
+                    total_no_url += 1
+            if records and chunk_errors == len(records) and not result:
+                LOGGER.warning("Lookup returned 100%% server errors — "
+                               "aborting remaining refresh chunks")
+                lookup_broken = True
+                break
+            if i + self._LOOKUP_CHUNK_SIZE < len(photos):
+                time.sleep(self._LOOKUP_CHUNK_DELAY)
+        not_returned = len(photos) - total_records
+        if len(photos) > 1:
+            LOGGER.info(
+                "Batch refresh: requested=%d records_returned=%d "
+                "urls_found=%d server_errors=%d deleted=%d "
+                "no_url=%d not_returned=%d",
+                len(photos), total_records, len(result),
+                total_server_errors, total_deleted,
+                total_no_url, not_returned)
         return result
 
     def _batch_query(self, payload):
@@ -371,15 +413,19 @@ class PhotosService:
                 smart_filter=query_filter, smart_count_key=count_key,
             )
 
-        # User-created albums (top-level; sub-albums inside folders are
-        # fetched in a second pass below).
-        folders = {}  # recordName -> folder name
+        # Bursts use dedicated record types instead of a smartAlbum filter
+        self._albums["Bursts"] = PhotoAlbum(
+            self, "Bursts", album_type="burst"
+        )
+
+        # User-created albums and folders (recursively, including nested folders).
         try:
             data = self._query({
                 "query": {"recordType": "CPLAlbumByPositionLive"},
                 "zoneID": self.ZONE_ID,
                 "resultsLimit": 500,
             })
+            folders = []
             for record in data.get("records", []):
                 rn = record.get("recordName", "")
                 if rn in ("----Root-Folder----", "----Project-Root-Folder----"):
@@ -399,43 +445,70 @@ class PhotosService:
                     album_type="folder" if is_folder else "user",
                 )
                 if is_folder:
-                    folders[rn] = name
+                    folders.append((rn, name))
+            self._fetch_folder_children(
+                folders, self._albums, self.ZONE_ID, self._query)
         except Exception:
             LOGGER.exception("Failed to fetch user albums")
 
-        # Second pass: fetch sub-albums for each folder album.
-        for folder_rn, folder_name in folders.items():
-            try:
-                child_data = self._query({
-                    "query": {
-                        "recordType": "CPLAlbumByPositionLive",
-                        "filterBy": [{
-                            "fieldName": "parentId",
-                            "comparator": "EQUALS",
-                            "fieldValue": {"type": "STRING", "value": folder_rn},
-                        }],
-                    },
-                    "zoneID": self.ZONE_ID,
-                    "resultsLimit": 500,
-                })
-                for record in child_data.get("records", []):
-                    rn = record.get("recordName", "")
-                    fields = record.get("fields", {})
-                    if fields.get("isDeleted", {}).get("value"):
-                        continue
-                    raw_name = fields.get("albumNameEnc", {}).get("value", "")
-                    name = _decode_b64_name(raw_name)
-                    if not name:
-                        name = fields.get("albumName", {}).get("value", "")
-                    if name:
-                        self._albums[name] = PhotoAlbum(
-                            self, name, record_name=rn, album_type="user",
-                            parent_folder=folder_name,
-                        )
-            except Exception:
-                LOGGER.exception("Failed to fetch sub-albums for folder %s", folder_name)
-
         return self._albums
+
+    def _fetch_folder_children(self, folders, albums_dict, zone_id, query_fn,
+                               max_depth=5):
+        """Recursively fetch sub-albums for folder albums.
+
+        `folders` is a list of (recordName, parent_path) tuples.
+        Discovered sub-folders are queued for the next depth level.
+        """
+        use_zone = zone_id if zone_id != self.ZONE_ID else None
+        for depth in range(max_depth):
+            if not folders:
+                break
+            next_folders = []
+            for folder_rn, parent_path in folders:
+                try:
+                    child_data = query_fn({
+                        "query": {
+                            "recordType": "CPLAlbumByPositionLive",
+                            "filterBy": [{
+                                "fieldName": "parentId",
+                                "comparator": "EQUALS",
+                                "fieldValue": {"type": "STRING",
+                                               "value": folder_rn},
+                            }],
+                        },
+                        "zoneID": zone_id,
+                        "resultsLimit": 500,
+                    })
+                    for record in child_data.get("records", []):
+                        rn = record.get("recordName", "")
+                        fields = record.get("fields", {})
+                        if fields.get("isDeleted", {}).get("value"):
+                            continue
+                        raw_name = fields.get("albumNameEnc", {}).get(
+                            "value", "")
+                        name = _decode_b64_name(raw_name)
+                        if not name:
+                            name = fields.get("albumName", {}).get(
+                                "value", "")
+                        if not name:
+                            continue
+                        is_folder = (fields.get("albumType", {})
+                                     .get("value", 0) == 3)
+                        albums_dict[name] = PhotoAlbum(
+                            self, name, record_name=rn,
+                            album_type="folder" if is_folder else "user",
+                            parent_folder=parent_path,
+                            zone_id=use_zone,
+                        )
+                        if is_folder:
+                            child_path = parent_path + "/" + name
+                            next_folders.append((rn, child_path))
+                except Exception:
+                    LOGGER.exception(
+                        "Failed to fetch sub-albums for folder %s",
+                        parent_path)
+            folders = next_folders
 
     def refresh_albums(self):
         """Invalidate cached albums so the next access re-fetches from iCloud."""
@@ -671,7 +744,7 @@ class PhotosService:
                 zone_id=zone_id,
             )
 
-        folders = {}
+        folders = []
         try:
             data = self._query_zone({
                 "query": {"recordType": "CPLAlbumByPositionLive"},
@@ -696,39 +769,12 @@ class PhotosService:
                     album_type="folder" if is_folder else "user",
                 )
                 if is_folder:
-                    folders[rn] = name
+                    folders.append((rn, name))
         except Exception:
             LOGGER.exception("Failed to fetch shared library user albums")
 
-        for folder_rn, folder_name in folders.items():
-            try:
-                child_data = self._query_zone({
-                    "query": {
-                        "recordType": "CPLAlbumByPositionLive",
-                        "filterBy": [{
-                            "fieldName": "parentId",
-                            "comparator": "EQUALS",
-                            "fieldValue": {"type": "STRING", "value": folder_rn},
-                        }],
-                    },
-                    "resultsLimit": 500,
-                }, zone_id)
-                for record in child_data.get("records", []):
-                    rn = record.get("recordName", "")
-                    fields = record.get("fields", {})
-                    if fields.get("isDeleted", {}).get("value"):
-                        continue
-                    raw_name = fields.get("albumNameEnc", {}).get("value", "")
-                    name = _decode_b64_name(raw_name)
-                    if not name:
-                        name = fields.get("albumName", {}).get("value", "")
-                    if name:
-                        self._shared_library_albums[name] = PhotoAlbum(
-                            self, name, record_name=rn, zone_id=zone_id,
-                            album_type="user", parent_folder=folder_name,
-                        )
-            except Exception:
-                LOGGER.exception("Failed to fetch shared library sub-albums for %s", folder_name)
+        self._fetch_folder_children(
+            folders, self._shared_library_albums, zone_id, self._query)
 
         return self._shared_library_albums
 

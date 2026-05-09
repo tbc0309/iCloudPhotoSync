@@ -100,17 +100,15 @@ def _stop(signum, frame):
 
 
 def _interval_seconds(account_id):
-    # Per-account: UI saves sync_interval_hours into each account's
-    # sync_config.json, not the global config.json. Reading the global
-    # file would always return the default 6h.
+    """Return the auto-sync interval in seconds, or 0 for manual-only."""
     cfg = config_manager.get_sync_config(account_id)
     hours = cfg.get("sync_interval_hours", 6)
     try:
         hours = int(hours)
     except (TypeError, ValueError):
         hours = 6
-    if hours < 1:
-        hours = 1
+    if hours < 0:
+        hours = 0
     return hours * 3600
 
 
@@ -127,6 +125,8 @@ def _first_sync_done(account_id):
 
 
 def _due(account_id, interval):
+    if interval <= 0:
+        return False
     # Hard gate: until the user has kicked off the first sync manually, the
     # scheduler never auto-runs — even across DSM reboots. This gives them
     # time to finish configuring albums/folders before anything downloads.

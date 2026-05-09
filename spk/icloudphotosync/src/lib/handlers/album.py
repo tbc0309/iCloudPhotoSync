@@ -34,14 +34,16 @@ _TYPE_ORDER = {"all": 0, "folder": 1, "user": 1, "smart": 2, "shared": 3}
 
 
 def _album_sort_key(a):
-    """Sort: All Photos first, then user+folder albums grouped (folders
-    before their children, sub-albums directly beneath their parent),
+    """Sort: All Photos first, then user+folder albums grouped with
+    proper tree ordering (parent before children at every depth),
     then smart folders, then shared."""
     t = _TYPE_ORDER.get(a["type"], 9)
     parent = a.get("parent_folder") or ""
-    group = (parent or a["name"]).lower()
-    is_child = 1 if parent else 0
-    return (t, group, is_child, a["name"].lower())
+    if parent:
+        full_path = parent + "/" + a["name"]
+    else:
+        full_path = a["name"]
+    return (t, full_path.lower())
 
 
 def _maybe_adp_error(exc, fallback_code):
@@ -241,10 +243,15 @@ def _list_albums(params):
                 cache["counts"].pop(key, None)
                 cache.get("types", {}).pop(key, None)
         album_types = cache.setdefault("types", {})
+        counts = cache.setdefault("counts", {})
         for a in album_list:
             album_types[a["name"]] = a["type"]
+            if a["type"] == "folder":
+                counts.setdefault(a["name"], 0)
         for a in shared_library_list:
             album_types["sl:" + a["name"]] = a["type"]
+            if a["type"] == "folder":
+                counts.setdefault("sl:" + a["name"], 0)
         _save_cache(account_id, cache)
 
         cache_age = int(time.time()) - cache.get("updated", 0)
