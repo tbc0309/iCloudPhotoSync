@@ -115,6 +115,7 @@ class PyiCloudSession(Session):
         if not response.ok and (
             content_type not in json_mimetypes or response.status_code in [421, 450, 500]
         ):
+            self._log_error_response(request_logger, response)
             self._raise_error(str(response.status_code), response.reason)
 
         if content_type not in json_mimetypes:
@@ -136,6 +137,7 @@ class PyiCloudSession(Session):
                 if errors:
                     code = errors[0].get("code")
                     reason = errors[0].get("message")
+                self._log_error_response(request_logger, response, code, reason)
                 self._raise_error(code or "Unknown", reason or "Unknown")
             elif not data.get("success"):
                 reason = data.get("errorMessage")
@@ -153,9 +155,25 @@ class PyiCloudSession(Session):
                     code = data.get("error")
 
                 if reason:
+                    self._log_error_response(request_logger, response, code, reason)
                     self._raise_error(code or "Unknown", reason)
 
         return response
+
+    @staticmethod
+    def _log_error_response(logger, response, code=None, reason=None):
+        body = ""
+        try:
+            body = response.text[:1000]
+        except Exception:
+            pass
+        logger.warning(
+            "Apple API error: %s %s → HTTP %d | code=%s reason=%s | body=%s",
+            response.request.method, response.url,
+            response.status_code,
+            code or "-", reason or "-",
+            body or "(empty)"
+        )
 
     def _raise_error(self, code, reason):
         if (
@@ -183,5 +201,11 @@ class PyiCloudSession(Session):
             )
         if code in ["421", "450", "500"]:
             reason = "Authentication required for Account."
+        if code == "Unknown" and reason in ("Unknown", "Unknown reason"):
+            reason = (
+                "Apple returned an unrecognized error. This is usually "
+                "temporary — try logging out and back in. If it persists, "
+                "check the package log for details."
+            )
 
         raise PyiCloudAPIResponseException(reason, code)

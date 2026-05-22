@@ -852,6 +852,25 @@ Ext.define("SYNO.SDS.iCloudPhotoSync.OverviewTab", {
         if (stopBtn) stopBtn.dom.style.display = "none";
     },
 
+    _reloadCurrentAccount: function () {
+        var self = this;
+        var accountId = this.currentAccountData && this.currentAccountData.id;
+        if (!accountId) return;
+        this.appWin.apiRequest("account", { action: "list" }, function (success, data) {
+            if (!success || !data || !data.accounts) return;
+            var al = self.appWin.accountList;
+            al.accountStore.loadData(data.accounts);
+            if (al.dataView && al.dataView.refresh) al.dataView.refresh();
+            var idx = al.accountStore.findExact("id", accountId);
+            if (idx >= 0) {
+                var rec = al.accountStore.getAt(idx);
+                al.selectedAccount = rec;
+                al.dataView.select(idx);
+                self.appWin.detailPanel.loadAccount(rec.data);
+            }
+        });
+    },
+
     _setIdleState: function (title, subtitle) {
         var iconEl = this.body.dom.querySelector(".ics-status-icon");
         var titleEl = this.body.dom.querySelector(".ics-status-title");
@@ -992,6 +1011,7 @@ Ext.define("SYNO.SDS.iCloudPhotoSync.OverviewTab", {
         }, function (success, data, errMsg) {
             if (!success) {
                 self._setErrorState(SYNO.SDS.iCloudPhotoSync._T("overview:status_error"), Ext.util.Format.htmlEncode(errMsg));
+                self._reloadCurrentAccount();
                 return;
             }
             self._pollSyncStatus(accountId);
@@ -1142,6 +1162,11 @@ Ext.define("SYNO.SDS.iCloudPhotoSync.OverviewTab", {
                 var pw2 = Ext.get("ics-sync-progress"); if (pw2) pw2.dom.style.display = "none";
                 self._setErrorState(SYNO.SDS.iCloudPhotoSync._T("overview:status_error"), Ext.util.Format.htmlEncode(data.error));
                 self.appWin.statusBar.body.update(SYNO.SDS.iCloudPhotoSync._T("overview:status_sync_failed"));
+                // Re-fetch account list so the UI picks up status changes
+                // (e.g. re_auth_needed after token expiry).  After refreshing
+                // the store, reload the current account's detail view so the
+                // connection info and reauth button reflect the new state.
+                self._reloadCurrentAccount();
             } else if (data.status === "stopped") {
                 self._stopRequested = false;
                 var pw3 = Ext.get("ics-sync-progress"); if (pw3) pw3.dom.style.display = "none";
@@ -3285,73 +3310,10 @@ Ext.define("SYNO.SDS.iCloudPhotoSync.AboutTab", {
                 notes + '</div></details>';
         }
 
-        html += '<button class="ics-update-btn" style="background:#057feb;color:#fff;border:none;border-radius:4px;' +
-            'padding:6px 16px;font-size:12px;cursor:pointer;margin-right:8px;">' +
-            Ext.util.Format.htmlEncode(SYNO.SDS.iCloudPhotoSync._T("about:btn_install_update")) + '</button>';
-
         if (data.spk_url) {
             html += '<a href="' + Ext.util.Format.htmlEncode(data.spk_url) + '" target="_blank" ' +
                 'style="font-size:11px;color:#057feb;text-decoration:none;">' +
                 Ext.util.Format.htmlEncode(SYNO.SDS.iCloudPhotoSync._T("about:btn_download_spk")) + '</a>';
-        }
-
-        html += '</div>';
-        el.innerHTML = html;
-
-        var btn = el.querySelector(".ics-update-btn");
-        if (btn) {
-            btn.addEventListener("click", function () {
-                self._installUpdate(el, data);
-            });
-        }
-    },
-
-    _installUpdate: function (el, data) {
-        var self = this;
-        var btn = el.querySelector(".ics-update-btn");
-        if (btn) {
-            btn.disabled = true;
-            btn.innerHTML = Ext.util.Format.htmlEncode(SYNO.SDS.iCloudPhotoSync._T("about:installing"));
-            btn.style.opacity = "0.6";
-        }
-
-        Ext.Ajax.request({
-            url: "/webman/3rdparty/iCloudPhotoSync/api.cgi",
-            params: { method: "update", action: "install" },
-            timeout: 180000,
-            success: function (resp) {
-                try {
-                    var d = Ext.decode(resp.responseText);
-                    if (d && d.success) {
-                        el.innerHTML = '<div style="background:#d4edda;border:1px solid #28a745;border-radius:6px;padding:12px 16px;max-width:360px;">' +
-                            '<span style="font-size:13px;color:#155724;">✓ ' +
-                            Ext.util.Format.htmlEncode(SYNO.SDS.iCloudPhotoSync._T("about:update_installed")) + '</span></div>';
-                    } else {
-                        var msg = (d && d.error && d.error.message) || "Unknown error";
-                        self._showInstallError(el, data, msg);
-                    }
-                } catch (e) {
-                    self._showInstallError(el, data, e.message);
-                }
-            },
-            failure: function () {
-                self._showInstallError(el, data, SYNO.SDS.iCloudPhotoSync._T("common:connection_failed"));
-            }
-        });
-    },
-
-    _showInstallError: function (el, data, msg) {
-        var html = '<div style="background:#f8d7da;border:1px solid #dc3545;border-radius:6px;padding:12px 16px;max-width:360px;text-align:left;">' +
-            '<div style="font-size:12px;color:#721c24;margin-bottom:8px;">' +
-            Ext.util.Format.htmlEncode(SYNO.SDS.iCloudPhotoSync._T("about:install_failed")) + ': ' +
-            Ext.util.Format.htmlEncode(msg) + '</div>';
-
-        if (data.spk_url) {
-            html += '<div style="font-size:11px;color:#721c24;">' +
-                Ext.util.Format.htmlEncode(SYNO.SDS.iCloudPhotoSync._T("about:install_manual_hint")) +
-                ' <a href="' + Ext.util.Format.htmlEncode(data.spk_url) + '" target="_blank" ' +
-                'style="color:#057feb;">' +
-                Ext.util.Format.htmlEncode(SYNO.SDS.iCloudPhotoSync._T("about:btn_download_spk")) + '</a></div>';
         }
 
         html += '</div>';

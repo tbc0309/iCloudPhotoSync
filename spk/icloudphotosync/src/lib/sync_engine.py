@@ -891,7 +891,7 @@ def _run_sync_locked(account_id):
         plan = []  # (album_name, folder_key, subfolder, photo_count, latest_date)
         if sync_config.get("photostream", {}).get("enabled", True):
             try:
-                ps_album = photos_svc.albums.get("All Photos")
+                ps_album = photos_svc.full_library
                 ps_count = ps_album.photo_count if ps_album else 0
             except Exception as e:
                 from pyicloud_ipd.exceptions import PyiCloudADPProtectionException
@@ -1046,7 +1046,9 @@ def _sync_album(account_id, photos_svc, album_name, target_dir, sync_config, pro
     progress.current_album = album_name
     progress.save()
 
-    if folder_key == "shared_library":
+    if folder_key == "photostream":
+        album = photos_svc.full_library
+    elif folder_key == "shared_library":
         album = photos_svc.shared_library
     elif folder_key == "shared_library_albums":
         album = photos_svc.shared_library_albums.get(album_name)
@@ -1492,7 +1494,12 @@ def _sync_album(account_id, photos_svc, album_name, target_dir, sync_config, pro
     MULTI_TRACK_THRESHOLD = 1000
     NUM_TRACKS = 4
 
-    if folder_key == "photostream" and total > MULTI_TRACK_THRESHOLD:
+    # Photostream ("All Photos") always uses ASCENDING from 0 because
+    # some iCloud accounts return an unreliable CloudKit count (e.g. 49
+    # instead of thousands).  ASCENDING + page-until-empty is count-
+    # independent and guaranteed to enumerate the full library.
+    # Multi-track is only used for album types with reliable counts.
+    if folder_key not in ("photostream",) and total > MULTI_TRACK_THRESHOLD:
         # Multi-track: N producers fetch disjoint DESCENDING ranges in
         # parallel to hide Apple's ~13s/batch latency. Local processing
         # stays single-threaded on the main consumer (it's only ~3s total
@@ -1551,14 +1558,10 @@ def _sync_album(account_id, photos_svc, album_name, target_dir, sync_config, pro
             off, photos = item
             _process_batch(photos, off)
     else:
-        # Single-track with one-batch-ahead prefetch. Still useful for
-        # user-created albums (ASCENDING) and for small photostreams.
-        if folder_key == "photostream":
-            direction = "DESCENDING"
-            offset = max(total - 1, 0)
-        else:
-            direction = "ASCENDING"
-            offset = 0
+        # Single-track with one-batch-ahead prefetch.  Photostream always
+        # lands here (ASCENDING from 0, pages until empty — count-independent).
+        direction = "ASCENDING"
+        offset = 0
 
         def _fetch_with_retry(lim, off, dirn):
             for _retry in range(_NET_RETRY_MAX):

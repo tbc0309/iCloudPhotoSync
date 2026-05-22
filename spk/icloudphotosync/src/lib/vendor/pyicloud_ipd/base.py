@@ -1,7 +1,7 @@
 """
 pyicloud_ipd base — simplified from icloudpd v1.32.2.
 
-Stripped: foundation dependency, observer pattern, CN domain support.
+Stripped: foundation dependency, observer pattern.
 Kept: SRP authentication, 2FA, session persistence, Photos service.
 """
 import base64
@@ -106,6 +106,20 @@ class PyiCloudService:
         else:
             self.session_data["client_id"] = self.client_id
 
+        # Restore domain from session if it was previously detected
+        saved_domain = self.session_data.get("domain")
+        if saved_domain and saved_domain != self.domain:
+            LOGGER.debug("Restoring saved domain '%s' from session", saved_domain)
+            if saved_domain == "cn":
+                self.AUTH_ENDPOINT = "https://idmsa.apple.com.cn/appleauth/auth"
+                self.HOME_ENDPOINT = "https://www.icloud.com.cn"
+                self.SETUP_ENDPOINT = "https://setup.icloud.com.cn/setup/ws/1"
+            elif saved_domain == "com":
+                self.AUTH_ENDPOINT = AUTH_ENDPOINT
+                self.HOME_ENDPOINT = HOME_ENDPOINT
+                self.SETUP_ENDPOINT = SETUP_ENDPOINT
+            self.domain = saved_domain
+
         # HTTP session
         self.session = PyiCloudSession(self)
         self.session.verify = verify
@@ -165,7 +179,15 @@ class PyiCloudService:
             self._authenticate_srp(self._password)
             self._authenticate_with_token()
 
-        self.params.update({"dsid": self.data["dsInfo"]["dsid"]})
+        ds_info = self.data.get("dsInfo")
+        if not ds_info:
+            raise PyiCloudFailedLoginException(
+                "Authentication failed: Apple did not return account info. "
+                "This may indicate a regional endpoint mismatch — try logging "
+                "in again or check your Apple ID region settings."
+            )
+        self.params.update({"dsid": ds_info["dsid"]})
+        self.session_data["domain"] = self.domain
         self._webservices = self.data.get("webservices", {})
         LOGGER.info("Authentication completed successfully")
 
@@ -224,6 +246,7 @@ class PyiCloudService:
             raise PyiCloudConnectionException(
                 "Apple requires unsupported domain '%s'" % new_domain)
         self.domain = new_domain
+        self.session_data["domain"] = new_domain
         self._authenticate_with_token()
 
     def _authenticate_srp(self, password):
@@ -344,10 +367,18 @@ class PyiCloudService:
                 data="null",
                 headers=headers,
             )
-            return response.json()
+            data = response.json()
         except PyiCloudAPIResponseException as err:
             LOGGER.debug("Invalid authentication token")
             raise err
+
+        domain_to_use = self._normalize_domain(data.get("domainToUse"))
+        if domain_to_use is not None and domain_to_use != self.domain:
+            LOGGER.info("Token validation: Apple requires domain '%s', switching from '%s'",
+                        domain_to_use, self.domain)
+            self._switch_domain(domain_to_use)
+            data = self.data
+        return data
 
     def _get_auth_headers(self, overrides=None):
         """Build headers for Apple auth endpoints."""

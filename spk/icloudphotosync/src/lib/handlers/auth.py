@@ -289,14 +289,16 @@ def _auth_status(params):
         if not account.get("authenticated_at"):
             updates["authenticated_at"] = int(time.time())
         config_manager.update_account(account_id, updates)
+        new_status = "authenticated"
     else:
         config_manager.update_account(account_id, {"status": "re_auth_needed"})
+        new_status = "re_auth_needed"
 
     return {
         "success": True,
         "data": {
             "account_id": account_id,
             "authenticated": authenticated,
-            "status": account.get("status", "unknown")
+            "status": new_status
         }
     }

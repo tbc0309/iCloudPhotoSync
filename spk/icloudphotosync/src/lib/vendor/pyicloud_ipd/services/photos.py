@@ -35,6 +35,42 @@ def _decode_b64_name(raw):
         return raw
 
 
+_ROOT_FOLDER_NAMES = ("----Root-Folder----", "----Project-Root-Folder----")
+
+
+def _build_parent_paths(parsed_records):
+    """Build a dict mapping recordName → parent_folder path.
+
+    `parsed_records` is a list of (recordName, name, is_folder, parentId)
+    tuples from the initial CPLAlbumByPositionLive query.
+    """
+    rn_to_name = {rn: name for rn, name, _, _ in parsed_records}
+    rn_to_parent = {rn: parent_rn for rn, _, _, parent_rn in parsed_records}
+
+    cache = {}
+
+    def _resolve(parent_rn, seen=None):
+        if not parent_rn or parent_rn in _ROOT_FOLDER_NAMES:
+            return ""
+        if parent_rn in cache:
+            return cache[parent_rn]
+        if seen is None:
+            seen = set()
+        if parent_rn in seen:
+            return ""
+        seen.add(parent_rn)
+        parent_name = rn_to_name.get(parent_rn)
+        if not parent_name:
+            return ""
+        grandparent_rn = rn_to_parent.get(parent_rn, "")
+        grandparent_path = _resolve(grandparent_rn, seen)
+        result = (grandparent_path + "/" + parent_name) if grandparent_path else parent_name
+        cache[parent_rn] = result
+        return result
+
+    return {rn: _resolve(parent_rn) for rn, _, _, parent_rn in parsed_records}
+
+
 class PhotoAlbum:
     """Represents an iCloud Photos album."""
 
@@ -394,6 +430,15 @@ class PhotosService:
         return False
 
     @property
+    def full_library(self):
+        """Return the whole iCloud Photos library as a dedicated pseudo-album.
+
+        Bypasses the albums dict so a user-created album named "All Photos"
+        cannot shadow the built-in whole-library source.
+        """
+        return PhotoAlbum(self, "All Photos", album_type="all")
+
+    @property
     def albums(self):
         """Returns dict of album name -> PhotoAlbum."""
         if self._albums is not None:
@@ -418,17 +463,21 @@ class PhotosService:
             self, "Bursts", album_type="burst"
         )
 
-        # User-created albums and folders (recursively, including nested folders).
+        # User-created albums and folders.
+        # CPLAlbumByPositionLive returns ALL albums including nested ones.
+        # We read parentId from each record to build the tree in one pass
+        # instead of relying on _fetch_folder_children to overwrite flat
+        # entries (which fails silently when the parentId query errors).
         try:
             data = self._query({
                 "query": {"recordType": "CPLAlbumByPositionLive"},
                 "zoneID": self.ZONE_ID,
                 "resultsLimit": 500,
             })
-            folders = []
+            parsed = []
             for record in data.get("records", []):
                 rn = record.get("recordName", "")
-                if rn in ("----Root-Folder----", "----Project-Root-Folder----"):
+                if rn in _ROOT_FOLDER_NAMES:
                     continue
                 fields = record.get("fields", {})
                 if fields.get("isDeleted", {}).get("value"):
@@ -440,12 +489,24 @@ class PhotosService:
                 if not name:
                     continue
                 is_folder = fields.get("albumType", {}).get("value", 0) == 3
+                parent_rn = (fields.get("parentId", {}).get("value") or "")
+                parsed.append((rn, name, is_folder, parent_rn))
+
+            parent_paths = _build_parent_paths(parsed)
+            folders = []
+            for rn, name, is_folder, parent_rn in parsed:
+                parent_path = parent_paths.get(rn, "")
                 self._albums[name] = PhotoAlbum(
                     self, name, record_name=rn,
                     album_type="folder" if is_folder else "user",
+                    parent_folder=parent_path or None,
                 )
                 if is_folder:
-                    folders.append((rn, name))
+                    full_path = (parent_path + "/" + name) if parent_path else name
+                    folders.append((rn, full_path))
+
+            # Fetch children that weren't in the initial bulk query
+            # (some CloudKit zones only return root-level items).
             self._fetch_folder_children(
                 folders, self._albums, self.ZONE_ID, self._query)
         except Exception:
@@ -750,9 +811,10 @@ class PhotosService:
                 "query": {"recordType": "CPLAlbumByPositionLive"},
                 "resultsLimit": 500,
             }, zone_id)
+            parsed = []
             for record in data.get("records", []):
                 rn = record.get("recordName", "")
-                if rn in ("----Root-Folder----", "----Project-Root-Folder----"):
+                if rn in _ROOT_FOLDER_NAMES:
                     continue
                 fields = record.get("fields", {})
                 if fields.get("isDeleted", {}).get("value"):
@@ -764,12 +826,20 @@ class PhotosService:
                 if not name:
                     continue
                 is_folder = fields.get("albumType", {}).get("value", 0) == 3
+                parent_rn = (fields.get("parentId", {}).get("value") or "")
+                parsed.append((rn, name, is_folder, parent_rn))
+
+            parent_paths = _build_parent_paths(parsed)
+            for rn, name, is_folder, parent_rn in parsed:
+                parent_path = parent_paths.get(rn, "")
                 self._shared_library_albums[name] = PhotoAlbum(
                     self, name, record_name=rn, zone_id=zone_id,
                     album_type="folder" if is_folder else "user",
+                    parent_folder=parent_path or None,
                 )
                 if is_folder:
-                    folders.append((rn, name))
+                    full_path = (parent_path + "/" + name) if parent_path else name
+                    folders.append((rn, full_path))
         except Exception:
             LOGGER.exception("Failed to fetch shared library user albums")
 
@@ -985,7 +1055,7 @@ class PhotosService:
                     LOGGER.debug("Zone %s: %d album record(s)", zone_name, len(album_records))
                     for record in album_records:
                         rn = record.get("recordName", "")
-                        if rn in ("----Root-Folder----", "----Project-Root-Folder----"):
+                        if rn in _ROOT_FOLDER_NAMES:
                             continue
                         fields = record.get("fields", {})
                         raw_name = fields.get("albumNameEnc", {}).get("value", "")
