@@ -4,6 +4,8 @@ Runs as a proper DSM app with its own tile, settings UI, scheduler daemon, and D
 
 Built with the [SynoCommunity/spksrc](https://github.com/SynoCommunity/spksrc) cross-compilation framework.
 
+<img width="1851" height="1129" alt="Unbenannt-1" src="https://github.com/user-attachments/assets/d5230266-5553-4aa1-88ca-030d1ae2570d" />
+
 ## Features
 
 - **iCloud Photostream, Albums & Shared Libraries** — incremental sync with deduplication via hardlinks
