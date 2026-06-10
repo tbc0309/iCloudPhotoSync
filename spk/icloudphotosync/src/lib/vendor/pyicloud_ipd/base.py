@@ -166,6 +166,21 @@ class PyiCloudService:
             except PyiCloudAPIResponseException:
                 LOGGER.debug("Invalid authentication token, will log in from scratch.")
 
+        if not login_successful and not force_refresh and \
+                self.session_data.get("session_token"):
+            # /validate relies on the short-lived WEBAUTH cookies. When they
+            # have expired (or a fresh process can't use them) the stored
+            # session token is usually still valid (~60 days) — accountLogin
+            # mints fresh cookies from it. Without this fallback every cookie
+            # hiccup forced a full re-login (see #62).
+            LOGGER.debug("Token validation failed — retrying accountLogin "
+                         "with stored session token")
+            try:
+                self._authenticate_with_token()
+                login_successful = True
+            except PyiCloudFailedLoginException:
+                LOGGER.debug("accountLogin with stored session token failed")
+
         if not login_successful:
             if not self._password:
                 LOGGER.info("No password provided and no valid session token — "
@@ -229,7 +244,15 @@ class PyiCloudService:
         return domain_value
 
     def _switch_domain(self, new_domain):
-        """Switch to a different iCloud domain and re-authenticate."""
+        """Switch to a different iCloud domain and re-authenticate.
+
+        Auth tokens are realm-specific: a session token minted by
+        idmsa.apple.com is not accepted by setup.icloud.com.cn (and vice
+        versa) — accountLogin there returns no dsInfo (see #59). When we
+        still have the password (i.e. during an interactive login), redo
+        the full SRP handshake against the new realm's IDMSA before
+        calling accountLogin.
+        """
         if getattr(self, '_domain_switched', False):
             raise PyiCloudConnectionException(
                 "Domain redirect loop: Apple keeps switching domains")
@@ -247,6 +270,16 @@ class PyiCloudService:
                 "Apple requires unsupported domain '%s'" % new_domain)
         self.domain = new_domain
         self.session_data["domain"] = new_domain
+        self.session.headers.update({
+            "Origin": self.HOME_ENDPOINT,
+            "Referer": "%s/" % self.HOME_ENDPOINT,
+        })
+        if self._password:
+            # Tokens and SRP session state from the old realm are invalid
+            # on the new one — drop them and authenticate from scratch.
+            for key in ("scnt", "session_id", "session_token"):
+                self.session_data.pop(key, None)
+            self._authenticate_srp(self._password)
         self._authenticate_with_token()
 
     def _authenticate_srp(self, password):
@@ -286,9 +319,12 @@ class PyiCloudService:
             "accountName": uname,
             "protocols": ["s2k", "s2k_fo"],
         }
+        # Origin/Referer must match the realm we authenticate against —
+        # idmsa.apple.com.cn for China accounts, idmsa.apple.com otherwise.
+        idmsa_origin = self.AUTH_ENDPOINT.split("/appleauth")[0]
         headers = self._get_auth_headers({
-            "Origin": "https://idmsa.apple.com",
-            "Referer": "https://idmsa.apple.com/",
+            "Origin": idmsa_origin,
+            "Referer": idmsa_origin + "/",
         })
 
         try:

@@ -463,6 +463,29 @@ def _log_path_diagnostics(path):
         parts = os.path.dirname(parts)
 
 
+def _volume_exists(vol_mount):
+    """Return True if /volumeN is a real data volume.
+
+    The point of this check is to prevent writing to the root filesystem
+    (system partition overflow) when the volume doesn't exist. ismount()
+    alone is too strict: it returns False for symlinked volumes (e.g.
+    /volume1 -> /volume2 after a pool migration) and can fail on exotic
+    setups even though the volume is perfectly valid (see issue #67).
+    A device comparison against / covers those cases — anything that
+    lives on a different device than the system partition is safe.
+    """
+    if not os.path.isdir(vol_mount):
+        return False
+    if os.path.ismount(vol_mount):
+        return True
+    try:
+        return os.stat(vol_mount).st_dev != os.stat("/").st_dev
+    except OSError:
+        # Cannot verify — let the later writability check decide instead
+        # of locking the user out on a stat error.
+        return True
+
+
 def _resolve_target_dir(path, account_id=None):
     """Resolve a DSM FileChooser path to the actual filesystem path.
 
@@ -474,11 +497,11 @@ def _resolve_target_dir(path, account_id=None):
     if not path:
         return path
     if path.startswith("/volume"):
-        # Verify the volume mountpoint actually exists to prevent
-        # writing to the root filesystem (system partition).
+        # Verify the volume actually exists to prevent writing to the
+        # root filesystem (system partition).
         parts = path.split("/")
         volume_mount = "/" + parts[1]  # e.g. "/volume1"
-        if not os.path.ismount(volume_mount):
+        if not _volume_exists(volume_mount):
             return "__INVALID_VOLUME__:" + path
         return path
 
@@ -944,6 +967,12 @@ def _run_sync_locked(account_id):
             album_metas.sort(key=lambda t: t[2], reverse=True)
             for name, count, latest in album_metas:
                 alb = photos_svc.albums.get(name)
+                # Folders are containers without their own record type —
+                # querying their photos sends "recordType": null which Apple
+                # rejects with BAD_REQUEST (see #63). Their sub-albums are
+                # synced as separate entries, so skipping loses nothing.
+                if alb is not None and alb.album_type == "folder":
+                    continue
                 if alb and alb.parent_folder:
                     parts = [_sanitize_path_component(p) for p in alb.parent_folder.split("/")]
                     parts.append(_sanitize_path_component(name))

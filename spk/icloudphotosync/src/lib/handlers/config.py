@@ -261,6 +261,8 @@ def _set_config(params):
         acc = config_manager.get_account(account_id) or {}
         dsm_user = acc.get("dsm_user", "")
 
+    current = config_manager.get_sync_config(account_id)
+
     # Resolve FileChooser share-relative paths and /home/... paths at save time
     if "target_dir" in updates:
         updates["target_dir"] = _resolve_share_path(updates["target_dir"])
@@ -268,15 +270,17 @@ def _set_config(params):
         if resolved.startswith("/home/") or resolved == "/home":
             return {"success": False, "error": {"code": 304,
                 "message": "Cannot resolve home path — DSM username unknown. Pick a shared folder or reopen the app."}}
-        if resolved.startswith("/volume"):
+        # Only validate when the target actually changes. The UI sends the
+        # full config on every save, so re-validating an unchanged (possibly
+        # stale) path would block all other settings changes (see #67).
+        if resolved != current.get("target_dir") and resolved.startswith("/volume"):
+            from sync_engine import _volume_exists
             vol_mount = "/" + resolved.split("/")[1]
-            if not os.path.ismount(vol_mount):
+            if not _volume_exists(vol_mount):
                 return {"success": False, "error": {"code": 305,
                     "message": "Volume %s does not exist on this NAS. "
                     "Please select a folder on an existing volume." % vol_mount}}
         updates["target_dir"] = resolved
-
-    current = config_manager.get_sync_config(account_id)
 
     # Target dir change policy is decided by the UI and passed via
     # `target_action`: "clear" (re-download everything, original behavior),

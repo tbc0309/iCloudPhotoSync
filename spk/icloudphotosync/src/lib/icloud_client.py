@@ -154,7 +154,17 @@ class ICloudClient:
 
             phones = self.api.get_trusted_phone_numbers()
             if not phones:
-                return {"success": False, "error": "No trusted phone numbers found"}
+                # Apple returns no phone numbers when the account is secured
+                # exclusively with hardware security keys or passkeys — the
+                # web API then offers no SMS/code fallback at all (see #58).
+                return {"success": False, "error":
+                    "Apple did not return any trusted phone numbers for this "
+                    "account. If your Apple ID uses only passkeys or hardware "
+                    "security keys (FIDO2/YubiKey) for two-factor "
+                    "authentication, Apple does not offer code-based sign-in "
+                    "for third-party apps — this app cannot log in then. "
+                    "Otherwise, add a trusted phone number at "
+                    "account.apple.com under Sign-In and Security."}
 
             result = self.api.send_2fa_code_sms(phones[0].id)
             if result:

@@ -127,6 +127,11 @@ class PhotoAlbum:
 
     def photos(self, limit=200, offset=0, direction="ASCENDING"):
         """Fetch photos in this album."""
+        if self.list_type is None:
+            # Folder containers have no list record type — a query would
+            # send "recordType": null and Apple rejects it with
+            # BadRequestException: missing required field 'recordType'.
+            return []
         if self.album_type == "shared" or self._uses_shared_db:
             return self.service._get_shared_album_photos(self, limit=limit, offset=offset, direction=direction)
         return self.service._get_album_photos(self, limit=limit, offset=offset, direction=direction)
